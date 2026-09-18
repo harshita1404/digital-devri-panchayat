@@ -123,16 +123,6 @@ def init_db():
         current_village_names
     )
 
-    # Do not expose old test/project/medical records that belong to the previous village list.
-    cur.execute(
-        f"DELETE FROM projects WHERE village NOT IN ({placeholders})",
-        current_village_names
-    )
-    cur.execute(
-        f"DELETE FROM medical WHERE village NOT IN ({placeholders})",
-        current_village_names
-    )
-
     # Complaints
     cur.execute("""
         CREATE TABLE IF NOT EXISTS complaints (
@@ -205,6 +195,30 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
+
+    # Remove records belonging to villages from the old version.
+    # The projects and medical tables already exist at this point.
+    project_columns = {
+        row["name"] for row in cur.execute(
+            "PRAGMA table_info(projects)"
+        ).fetchall()
+    }
+    if "village" in project_columns:
+        cur.execute(
+            f"DELETE FROM projects WHERE village NOT IN ({placeholders})",
+            current_village_names
+        )
+
+    medical_columns = {
+        row["name"] for row in cur.execute(
+            "PRAGMA table_info(medical)"
+        ).fetchall()
+    }
+    if "village" in medical_columns:
+        cur.execute(
+            f"DELETE FROM medical WHERE village NOT IN ({placeholders})",
+            current_village_names
+        )
 
     # Notices
     cur.execute("""
@@ -2962,8 +2976,9 @@ if __name__ == "__main__":
     print("Running...")
     print("=" * 60)
 
+    port = int(os.environ.get("PORT", "5000"))
     app.run(
-        host="127.0.0.1",
-        port=5000,
+        host="0.0.0.0",
+        port=port,
         debug=True
     )
