@@ -1,4 +1,4 @@
-from flask import Flask, request, redirect, url_for, session, render_template_string, flash
+from flask import Flask, request, redirect, url_for, session, render_template_string, flash, send_file
 import sqlite3
 from pathlib import Path
 from datetime import datetime
@@ -6,6 +6,10 @@ import os
 import secrets
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment
+from openpyxl.utils import get_column_letter
+from io import BytesIO
 
 # ============================================================
 # DIGITAL DEVRI PANCHAYAT
@@ -1569,69 +1573,131 @@ def notices():
     return render_page("सूचनाएं", content)
 
 
-# ============================================================
 # ADMIN LOGIN
 # ============================================================
 
 @app.route("/admin/login", methods=["GET", "POST"])
 def admin_login():
+
     if request.method == "POST":
-        username = request.form.get("username", "").strip()
-        password = request.form.get("password", "")
+
+        username = request.form.get(
+            "username",
+            ""
+        ).strip()
+
+        password = request.form.get(
+            "password",
+            ""
+        )
 
         conn = get_db()
+
         admin = conn.execute(
             "SELECT * FROM admins WHERE username=?",
             (username,)
         ).fetchone()
+
         conn.close()
 
         if admin and check_password_hash(
-            admin["password_hash"], password
+            admin["password_hash"],
+            password
         ):
+
             session["admin_logged_in"] = True
             session["admin_username"] = username
 
-            flash("Admin login सफल।", "success")
-            return redirect(url_for("admin_dashboard"))
+            flash(
+                "Admin login सफल।",
+                "success"
+            )
 
-        # Helpful fallback for a fresh/legacy deployment.
+            return redirect(
+                url_for("admin_dashboard")
+            )
+
+        # Fallback login keeps the original project credentials working
+        # even when an older database contains a different password hash.
         if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
             session["admin_logged_in"] = True
             session["admin_username"] = username
             flash("Admin login सफल।", "success")
             return redirect(url_for("admin_dashboard"))
 
-        flash("Username या password गलत है।", "error")
+        flash(
+            "Username या password गलत है।",
+            "error"
+        )
 
     content = """
-    <div class="form-card" style="max-width:500px">
+
+    <div class="form-card" style="max-width:500px;margin:auto;">
+
         <h1>🔐 Admin / Sarpanch Login</h1>
 
         <form method="POST">
+
             <div class="form-group">
+
                 <label>Username</label>
-                <input type="text" name="username" required>
+
+                <input
+                    type="text"
+                    name="username"
+                    required
+                >
+
             </div>
 
             <div class="form-group">
+
                 <label>Password</label>
-                <input type="password" name="password" required>
+
+                <input
+                    type="password"
+                    name="password"
+                    required
+                >
+
             </div>
 
-            <button class="btn">Login</button>
+            <button class="btn">
+                Login
+            </button>
+
         </form>
+
+        <br>
+
+        <small>
+            Local demo login:
+            admin / admin123
+        </small>
+
     </div>
+
     """
 
-    return render_page("Admin Login", content)
+    return render_page(
+        "Admin Login",
+        content
+    )
 
 
 @app.route("/admin/logout")
 def admin_logout():
+
     session.clear()
-    flash("Admin logout हो गया।", "success")
-    return redirect(url_for("home"))
+
+    flash(
+        "Admin logout हो गया।",
+        "success"
+    )
+
+    return redirect(
+        url_for("home")
+    )
 
 
 # ============================================================
@@ -1640,122 +1706,354 @@ def admin_logout():
 
 @app.route("/admin")
 def admin_dashboard():
+
     if not is_admin():
         return redirect(url_for("admin_login"))
 
     conn = get_db()
 
-    total_complaints = conn.execute(
+    user_count = conn.execute(
+        "SELECT COUNT(*) AS c FROM users"
+    ).fetchone()["c"]
+
+    complaint_count = conn.execute(
         "SELECT COUNT(*) AS c FROM complaints"
     ).fetchone()["c"]
 
-    open_complaints = conn.execute("""
-        SELECT COUNT(*) AS c
-        FROM complaints
-        WHERE status NOT IN ('समाधान','बंद')
-    """).fetchone()["c"]
+    project_count = conn.execute(
+        "SELECT COUNT(*) AS c FROM projects"
+    ).fetchone()["c"]
 
-    completed_complaints = conn.execute("""
-        SELECT COUNT(*) AS c
-        FROM complaints
-        WHERE status IN ('समाधान','बंद')
-    """).fetchone()["c"]
+    notice_count = conn.execute(
+        "SELECT COUNT(*) AS c FROM notices"
+    ).fetchone()["c"]
 
-    recent = conn.execute("""
+    village_counts = conn.execute(
+        """
+        SELECT village, COUNT(*) AS total
+        FROM users
+        GROUP BY village
+        ORDER BY village
+        """
+    ).fetchall()
+
+    recent_users = conn.execute(
+        """
+        SELECT *
+        FROM users
+        ORDER BY id DESC
+        LIMIT 30
+        """
+    ).fetchall()
+
+    recent_complaints = conn.execute(
+        """
         SELECT *
         FROM complaints
         ORDER BY id DESC
-        LIMIT 50
-    """).fetchall()
+        LIMIT 20
+        """
+    ).fetchall()
 
     conn.close()
 
-    rows = ""
+    village_html = ""
 
-    for c in recent:
-        progress = max(
-            0,
-            min(100, int(c["completion_percent"] or 0))
-        )
+    counts_dict = {
+        r["village"]: r["total"]
+        for r in village_counts
+    }
 
-        rows += f"""
-        <tr>
-            <td>{c["complaint_id"]}</td>
-            <td>{c["village"]}</td>
-            <td>{c["category"]}</td>
-            <td>{c["description"]}</td>
-            <td>
-                <span class="badge">{c["status"]}</span>
-            </td>
-            <td>{progress}%</td>
-            <td>
-                <a class="btn"
-                   href="/admin/complaint/{c["id"]}">
-                   Manage
-                </a>
-            </td>
-        </tr>
+    for v in VILLAGES:
+
+        village_html += f"""
+
+        <div class="stat">
+
+            <div class="stat-number">
+                {counts_dict.get(v["name_hi"], 0)}
+            </div>
+
+            <div>
+                {v["name_hi"]}
+            </div>
+
+        </div>
+
         """
 
-    if not rows:
-        rows = """
+    users_html = ""
+
+    for u in recent_users:
+
+        users_html += f"""
+
         <tr>
-            <td colspan="7">अभी कोई शिकायत नहीं है।</td>
+
+            <td>{u["user_id"]}</td>
+
+            <td>{u["name"]}</td>
+
+            <td>{u["mobile"]}</td>
+
+            <td>{u["village"]}</td>
+
+            <td>{u["registered_at"]}</td>
+
         </tr>
+
+        """
+
+    complaint_html = ""
+
+    for c in recent_complaints:
+
+        complaint_html += f"""
+
+        <tr>
+
+            <td>{c["complaint_id"]}</td>
+
+            <td>{c["village"]}</td>
+
+            <td>{c["category"]}</td>
+
+            <td>{c["description"]}</td>
+
+            <td>
+
+                <span class="badge">
+                    {c["status"]}
+                </span>
+
+            </td>
+
+            <td>{int(c["completion_percent"] or 0)}%</td>
+
+            <td>
+                <a
+                    class="btn"
+                    href="/admin/complaint/{c['id']}"
+                >
+                    Manage
+                </a>
+            </td>
+
+        </tr>
+
         """
 
     content = f"""
+
     <div class="hero">
-        <h1>⚙️ Admin / Sarpanch Dashboard</h1>
-        <p>यहां केवल नागरिक शिकायतों और उनके काम की प्रगति को manage करें।</p>
-    </div>
 
-    <div class="stats">
-        <div class="stat">
-            <div class="stat-number">{total_complaints}</div>
-            <div>कुल शिकायतें</div>
-        </div>
+        <h1>⚙️ Admin Dashboard</h1>
 
-        <div class="stat">
-            <div class="stat-number">{open_complaints}</div>
-            <div>चल रही शिकायतें</div>
-        </div>
-
-        <div class="stat">
-            <div class="stat-number">{completed_complaints}</div>
-            <div>समाधान / बंद</div>
-        </div>
-    </div>
-
-    <div class="card">
-        <h2>📝 शिकायत Management</h2>
         <p>
-            Complaint खोलकर status, action taken, work start date,
-            completion percentage और expected completion date update करें।
+            Welcome, {session.get("admin_username", "Admin")}
         </p>
 
-        <div class="table-wrap">
-            <table>
-                <thead>
-                    <tr>
-                        <th>Complaint ID</th>
-                        <th>गांव</th>
-                        <th>Category</th>
-                        <th>Problem</th>
-                        <th>Status</th>
-                        <th>काम पूरा</th>
-                        <th>Action</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {rows}
-                </tbody>
-            </table>
-        </div>
     </div>
+
+
+    <div class="stats">
+
+        <div class="stat">
+
+            <div class="stat-number">
+                {user_count}
+            </div>
+
+            <div>
+                👥 कुल Registered Users
+            </div>
+
+        </div>
+
+        <div class="stat">
+
+            <div class="stat-number">
+                {complaint_count}
+            </div>
+
+            <div>
+                📝 कुल Complaints
+            </div>
+
+        </div>
+
+        <div class="stat">
+
+            <div class="stat-number">
+                {project_count}
+            </div>
+
+            <div>
+                🏗️ Projects
+            </div>
+
+        </div>
+
+        <div class="stat">
+
+            <div class="stat-number">
+                {notice_count}
+            </div>
+
+            <div>
+                📢 Notices
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <h2>👥 Village-wise Registered Users</h2>
+
+    <div class="stats">
+
+        {village_html}
+
+    </div>
+
+
+    <div class="card">
+
+        <h2>📊 User Data / Excel</h2>
+
+        <p>
+            सभी registered users का permanent database record
+            Excel में export करें।
+        </p>
+
+        <a
+            class="btn"
+            href="/admin/users"
+        >
+            👥 Users List
+        </a>
+
+        <a
+            class="btn"
+            href="/admin/download-users-excel"
+        >
+            📥 Excel Download
+        </a>
+
+    </div>
+
+
+    <div class="card">
+
+        <h2>📝 Complaint Management</h2>
+
+        <div class="table-wrap">
+
+        <table>
+
+            <thead>
+
+                <tr>
+
+                    <th>Complaint ID</th>
+                    <th>गांव</th>
+                    <th>Category</th>
+                    <th>Problem</th>
+                    <th>Status</th>
+                    <th>Progress</th>
+                    <th>Action</th>
+
+                </tr>
+
+            </thead>
+
+            <tbody>
+
+                {complaint_html}
+
+            </tbody>
+
+        </table>
+
+        </div>
+
+    </div>
+
+
+    <div class="card">
+
+        <h2>➕ Admin Management</h2>
+
+        <a class="btn" href="/admin/project/add">
+            Development Project Add
+        </a>
+
+        <a class="btn" href="/admin/medical/add">
+            Medical Facility Add
+        </a>
+
+        <a class="btn" href="/admin/notice/add">
+            Notice Add
+        </a>
+
+    </div>
+
     """
 
-    return render_page("Admin Dashboard", content)
+    return render_page(
+        "Admin Dashboard",
+        content
+    )
+
+
+# ============================================================
+# ADMIN USERS
+# ============================================================
+
+@app.route("/admin/users")
+def admin_users():
+    if not is_admin(): return redirect(url_for("admin_login"))
+    selected_village = request.args.get("village", "")
+    conn = get_db()
+    users = conn.execute("SELECT * FROM users WHERE village=? ORDER BY id DESC", (selected_village,)).fetchall() if selected_village else conn.execute("SELECT * FROM users ORDER BY id DESC").fetchall()
+    conn.close()
+    options='<option value="">सभी गांव</option>' + ''.join(f'<option value="{v['name_hi']}" {"selected" if selected_village==v["name_hi"] else ""}>{v['name_hi']}</option>' for v in VILLAGES)
+    rows=''.join(f'''<tr><td>{u['user_id']}</td><td>{u['name']}</td><td>{u['mobile']}</td><td>{mask_aadhaar(u["aadhaar"])}</td><td>{u['village']}</td><td>{"Verified" if u["mobile_verified"] else "Not Verified"}</td><td>{u['registered_at']}</td><td>{u['last_login'] or "—"}</td><td>{u['login_count'] or 0}</td></tr>''' for u in users)
+    content=f'''<h1>👥 Registered Citizens — Sarpanch/Admin Only</h1><div class="card"><form method="GET"><label>Village-wise Filter</label><select name="village" onchange="this.form.submit()">{options}</select></form><br><a class="btn" href="/admin/download-users-excel">📥 Excel Download</a></div><div class="card"><p>कुल registered citizens: <b>{len(users)}</b></p><p>यह जानकारी public website पर नहीं दिखाई जाती। केवल authorized Admin/Sarpanch dashboard से देखी जा सकती है।</p><div class="table-wrap"><table><thead><tr><th>User ID</th><th>Name</th><th>Mobile</th><th>Aadhaar</th><th>Village</th><th>Mobile Verified</th><th>Registered At</th><th>Last Login</th><th>Login Count</th></tr></thead><tbody>{rows}</tbody></table></div></div>'''
+    return render_page("Registered Users", content)
+
+
+# ============================================================
+# EXCEL DOWNLOAD
+
+# ============================================================
+
+@app.route("/admin/download-users-excel")
+def download_users_excel():
+    if not is_admin(): return redirect(url_for("admin_login"))
+    conn=get_db()
+    users=conn.execute("SELECT user_id,name,mobile,aadhaar,village,mobile_verified,registered_at,last_seen,last_login,login_count,consent FROM users ORDER BY village,id").fetchall()
+    conn.close()
+    wb=Workbook(); ws=wb.active; ws.title="All Users"
+    headers=["User ID","Name","Mobile","Aadhaar","Village","Mobile Verified","Registered At","Last Seen","Last Login","Login Count","Consent"]
+    def setup_sheet(sheet,data_rows):
+        sheet.append(headers)
+        for cell in sheet[1]: cell.font=Font(bold=True); cell.alignment=Alignment(horizontal="center")
+        for row in data_rows:
+            sheet.append([row["user_id"],row["name"],row["mobile"],row["aadhaar"] or "",row["village"],"Yes" if row["mobile_verified"] else "No",row["registered_at"],row["last_seen"] or "",row["last_login"] or "",row["login_count"] or 0,"Yes" if row["consent"] else "No"])
+        for col in range(1,len(headers)+1):
+            max_length=max((len(str(c.value)) for c in sheet[get_column_letter(col)] if c.value),default=0)
+            sheet.column_dimensions[get_column_letter(col)].width=min(max_length+3,35)
+        sheet.freeze_panes="A2"; sheet.auto_filter.ref=sheet.dimensions
+    setup_sheet(ws,users)
+    for v in VILLAGES:
+        safe=v["name_en"].replace("/","-").replace("\\","-")[:31]
+        ws_v=wb.create_sheet(safe)
+        setup_sheet(ws_v,[u for u in users if u["village"]==v["name_hi"]])
+    output=BytesIO(); wb.save(output); output.seek(0)
+    filename="Devri_Panchayat_Registered_Users_"+datetime.now().strftime("%Y%m%d_%H%M%S")+".xlsx"
+    return send_file(output,as_attachment=True,download_name=filename,mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 
 # ============================================================
@@ -1993,6 +2291,440 @@ def admin_complaint(complaint_db_id):
     return render_page("Complaint Management", content)
 
 
+# ============================================================
+# ADMIN ADD PROJECT
+# ============================================================
+
+@app.route("/admin/project/add", methods=["GET", "POST"])
+def admin_add_project():
+
+    if not is_admin():
+        return redirect(url_for("admin_login"))
+
+    if request.method == "POST":
+
+        village = request.form.get("village")
+        title = request.form.get("title")
+        description = request.form.get("description")
+        department = request.form.get("department")
+        progress = request.form.get("progress", "0")
+        status = request.form.get("status")
+        start_date = request.form.get("start_date")
+        expected_date = request.form.get("expected_date")
+
+        conn = get_db()
+
+        conn.execute(
+            """
+            INSERT INTO projects
+            (
+                village,
+                title,
+                description,
+                department,
+                progress,
+                status,
+                start_date,
+                expected_date,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                village,
+                title,
+                description,
+                department,
+                int(progress or 0),
+                status,
+                start_date,
+                expected_date,
+                current_time()
+            )
+        )
+
+        conn.commit()
+        conn.close()
+
+        flash(
+            "Development project added.",
+            "success"
+        )
+
+        return redirect(
+            url_for("admin_dashboard")
+        )
+
+    village_options = "".join(
+        f'<option>{v["name_hi"]}</option>'
+        for v in VILLAGES
+    )
+
+    content = f"""
+
+    <div class="form-card">
+
+        <h1>🏗️ Development Project Add</h1>
+
+        <form method="POST">
+
+            <div class="form-group">
+
+                <label>गांव</label>
+
+                <select name="village">
+                    {village_options}
+                </select>
+
+            </div>
+
+            <div class="form-group">
+
+                <label>Project Title</label>
+
+                <input
+                    name="title"
+                    required
+                >
+
+            </div>
+
+            <div class="form-group">
+
+                <label>Description</label>
+
+                <textarea name="description"></textarea>
+
+            </div>
+
+            <div class="form-group">
+
+                <label>Department</label>
+
+                <input name="department">
+
+            </div>
+
+            <div class="form-group">
+
+                <label>Progress %</label>
+
+                <input
+                    type="number"
+                    name="progress"
+                    min="0"
+                    max="100"
+                    value="0"
+                >
+
+            </div>
+
+            <div class="form-group">
+
+                <label>Status</label>
+
+                <select name="status">
+
+                    <option>प्रस्तावित</option>
+                    <option>स्वीकृत</option>
+                    <option>कार्य जारी</option>
+                    <option>पूर्ण</option>
+
+                </select>
+
+            </div>
+
+            <div class="form-group">
+
+                <label>Start Date</label>
+
+                <input
+                    type="date"
+                    name="start_date"
+                >
+
+            </div>
+
+            <div class="form-group">
+
+                <label>Expected Completion</label>
+
+                <input
+                    type="date"
+                    name="expected_date"
+                >
+
+            </div>
+
+            <button class="btn">
+                Save Project
+            </button>
+
+        </form>
+
+    </div>
+
+    """
+
+    return render_page(
+        "Add Project",
+        content
+    )
+
+
+# ============================================================
+# ADMIN ADD MEDICAL
+# ============================================================
+
+@app.route("/admin/medical/add", methods=["GET", "POST"])
+def admin_add_medical():
+
+    if not is_admin():
+        return redirect(url_for("admin_login"))
+
+    if request.method == "POST":
+
+        village = request.form.get("village")
+        facility_name = request.form.get("facility_name")
+        facility_type = request.form.get("type")
+        contact = request.form.get("contact")
+        timing = request.form.get("timing")
+        description = request.form.get("description")
+
+        conn = get_db()
+
+        conn.execute(
+            """
+            INSERT INTO medical
+            (
+                village,
+                facility_name,
+                type,
+                contact,
+                timing,
+                description,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                village,
+                facility_name,
+                facility_type,
+                contact,
+                timing,
+                description,
+                current_time()
+            )
+        )
+
+        conn.commit()
+        conn.close()
+
+        flash(
+            "Medical facility added.",
+            "success"
+        )
+
+        return redirect(
+            url_for("admin_dashboard")
+        )
+
+    village_options = "".join(
+        f'<option>{v["name_hi"]}</option>'
+        for v in VILLAGES
+    )
+
+    content = f"""
+
+    <div class="form-card">
+
+        <h1>🏥 Medical Facility Add</h1>
+
+        <form method="POST">
+
+            <div class="form-group">
+
+                <label>गांव</label>
+
+                <select name="village">
+
+                    {village_options}
+
+                </select>
+
+            </div>
+
+            <div class="form-group">
+
+                <label>Facility Name</label>
+
+                <input
+                    name="facility_name"
+                    required
+                >
+
+            </div>
+
+            <div class="form-group">
+
+                <label>Type</label>
+
+                <input name="type">
+
+            </div>
+
+            <div class="form-group">
+
+                <label>Contact</label>
+
+                <input name="contact">
+
+            </div>
+
+            <div class="form-group">
+
+                <label>Timing</label>
+
+                <input name="timing">
+
+            </div>
+
+            <div class="form-group">
+
+                <label>Description</label>
+
+                <textarea name="description"></textarea>
+
+            </div>
+
+            <button class="btn">
+                Save Facility
+            </button>
+
+        </form>
+
+    </div>
+
+    """
+
+    return render_page(
+        "Add Medical Facility",
+        content
+    )
+
+
+# ============================================================
+# ADMIN ADD NOTICE
+# ============================================================
+
+@app.route("/admin/notice/add", methods=["GET", "POST"])
+def admin_add_notice():
+
+    if not is_admin():
+        return redirect(url_for("admin_login"))
+
+    if request.method == "POST":
+
+        title = request.form.get("title")
+        content_text = request.form.get("content")
+        notice_date = request.form.get("notice_date")
+
+        conn = get_db()
+
+        conn.execute(
+            """
+            INSERT INTO notices
+            (
+                title,
+                content,
+                notice_date,
+                created_at
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                title,
+                content_text,
+                notice_date,
+                current_time()
+            )
+        )
+
+        conn.commit()
+        conn.close()
+
+        flash(
+            "Notice added.",
+            "success"
+        )
+
+        return redirect(
+            url_for("admin_dashboard")
+        )
+
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    content = f"""
+
+    <div class="form-card">
+
+        <h1>📢 Notice Add</h1>
+
+        <form method="POST">
+
+            <div class="form-group">
+
+                <label>Notice Title</label>
+
+                <input
+                    name="title"
+                    required
+                >
+
+            </div>
+
+            <div class="form-group">
+
+                <label>Notice Content</label>
+
+                <textarea
+                    name="content"
+                    required
+                ></textarea>
+
+            </div>
+
+            <div class="form-group">
+
+                <label>Date</label>
+
+                <input
+                    type="date"
+                    name="notice_date"
+                    value="{today}"
+                    required
+                >
+
+            </div>
+
+            <button class="btn">
+                Publish Notice
+            </button>
+
+        </form>
+
+    </div>
+
+    """
+
+    return render_page(
+        "Add Notice",
+        content
+    )
+
+
+# ============================================================
 # ============================================================
 # 404
 # ============================================================
